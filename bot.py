@@ -24,6 +24,14 @@ WALLET_FILE = "wallets.json"
 GIVEAWAY_FILE = "giveaways.json"
 SUPPORT_ROLE_ID = 1434628709452742747
 
+# Role IDs for extra entries
+BOOSTER_ROLE_ID = 591776624547201025
+WINNERS_CIRCLE_ROLE_ID = 1421659378523832431
+
+# Image URLs
+THUMBNAIL_URL = "https://oldschool.runescape.wiki/images/thumb/Coins_detail.png/240px-Coins_detail.png?404bc"
+BANNER_URL = "https://i.postimg.cc/HkTwJVLb/thieving-giveaway-banner-1.png"
+
 # Load wallet data
 def load_wallets():
     if os.path.exists(WALLET_FILE):
@@ -108,7 +116,21 @@ def parse_duration(duration_str):
     
     return None
 
-# Giveaway entry button
+async def get_user_entries(member):
+    """Calculate how many entries a user gets based on their roles"""
+    entries = 1  # Base entry
+    
+    # Check for booster role - gets 2 extra entries
+    if any(role.id == BOOSTER_ROLE_ID for role in member.roles):
+        entries += 2
+    
+    # Check for winners circle role - gets 3 extra entries
+    if any(role.id == WINNERS_CIRCLE_ROLE_ID for role in member.roles):
+        entries += 3
+    
+    return entries
+
+# Giveaway entry button with participants viewer
 class GiveawayButton(discord.ui.View):
     def __init__(self, giveaway_id):
         super().__init__(timeout=None)
@@ -141,7 +163,16 @@ class GiveawayButton(discord.ui.View):
         giveaway['entries'].append(user_id)
         save_giveaways(giveaways)
         
-        await interaction.response.send_message("✅ You've successfully entered the giveaway! Good luck!", ephemeral=True)
+        # Get user's entry count
+        member = interaction.guild.get_member(interaction.user.id)
+        user_entries = await get_user_entries(member)
+        
+        entry_msg = f"✅ You've successfully entered the giveaway!"
+        if user_entries > 1:
+            entry_msg += f"\n🎯 You have **{user_entries} entries** (role bonuses applied)!"
+        entry_msg += "\nGood luck!"
+        
+        await interaction.response.send_message(entry_msg, ephemeral=True)
         
         # Update the giveaway message with new entry count
         try:
@@ -158,6 +189,33 @@ class GiveawayButton(discord.ui.View):
             await message.edit(embed=embed)
         except:
             pass
+    
+    @discord.ui.button(label="👥 Participants", style=discord.ButtonStyle.secondary, custom_id="view_participants")
+    async def view_participants(self, interaction: discord.Interaction, button: discord.ui.Button):
+        giveaways = load_giveaways()
+        giveaway = giveaways.get(self.giveaway_id)
+        
+        if not giveaway:
+            await interaction.response.send_message("❌ This giveaway no longer exists!", ephemeral=True)
+            return
+        
+        if not giveaway['entries']:
+            await interaction.response.send_message("❌ No participants yet!", ephemeral=True)
+            return
+        
+        # Create participant list
+        participants = []
+        for user_id in giveaway['entries']:
+            participants.append(f"<@{user_id}>")
+        
+        embed = discord.Embed(
+            title=f"👥 Giveaway Participants ({len(participants)})",
+            description="\n".join(participants),
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text=f"Prize: {giveaway['prize']}")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.event
 async def on_ready():
@@ -189,7 +247,7 @@ async def check_giveaways():
             await end_giveaway(giveaway_id, giveaway)
 
 async def end_giveaway(giveaway_id, giveaway):
-    """End a giveaway and pick winners"""
+    """End a giveaway and pick winners with weighted entries"""
     giveaways = load_giveaways()
     
     # Mark as ended
@@ -200,6 +258,7 @@ async def end_giveaway(giveaway_id, giveaway):
     try:
         channel = bot.get_channel(giveaway['channel_id'])
         message = await channel.fetch_message(giveaway['message_id'])
+        guild = channel.guild
         
         # Pick winners
         entries = giveaway['entries']
@@ -212,62 +271,114 @@ async def end_giveaway(giveaway_id, giveaway):
                 description=f"**Prize:** {giveaway['prize']}\n\n❌ No one entered this giveaway!",
                 color=discord.Color.red()
             )
+            embed.set_thumbnail(url=THUMBNAIL_URL)
+            embed.set_image(url=BANNER_URL)
             await message.edit(embed=embed, view=None)
             await channel.send(f"The giveaway for **{giveaway['prize']}** has ended with no entries!")
             return
         
-        # Select winners (or all entries if not enough)
-        num_to_pick = min(num_winners, len(entries))
-        winner_ids = random.sample(entries, num_to_pick)
+        # Build weighted entry pool
+        entry_pool = []
+        valid_users = []
         
-        # Award GP to winners
+        for user_id in entries:
+            try:
+                member = guild.get_member(int(user_id))
+                if not member:
+                    continue
+                
+                valid_users.append(member)
+                
+                # Add weighted entries based on roles
+                user_entries = await get_user_entries(member)
+                for _ in range(user_entries):
+                    entry_pool.append(member)
+            except:
+                continue
+        
+        if not entry_pool:
+            embed = discord.Embed(
+                title="🎉 Giveaway Ended",
+                description=f"**Prize:** {giveaway['prize']}\n\n❌ No valid entries!",
+                color=discord.Color.red()
+            )
+            embed.set_thumbnail(url=THUMBNAIL_URL)
+            embed.set_image(url=BANNER_URL)
+            await message.edit(embed=embed, view=None)
+            return
+        
+        # Select winners (with weighted chances)
+        num_to_pick = min(num_winners, len(valid_users))
+        winners = []
+        
+        for _ in range(num_to_pick):
+            if not entry_pool:
+                break
+            winner = random.choice(entry_pool)
+            if winner not in winners:
+                winners.append(winner)
+            # Remove all entries from this winner
+            entry_pool = [m for m in entry_pool if m.id != winner.id]
+        
         gp_amount = giveaway['gp_amount']
-        winners_text = []
         
-        for winner_id in winner_ids:
-            # Add GP to wallet
-            current_balance = get_balance(int(winner_id))
-            new_balance = current_balance + gp_amount
-            set_balance(int(winner_id), new_balance)
+        # Award GP to winners and give Winners Circle role
+        winners_circle_role = guild.get_role(WINNERS_CIRCLE_ROLE_ID)
+        winner_mentions = []
+        
+        for winner in winners:
+            winner_mentions.append(winner.mention)
             
-            winners_text.append(f"<@{winner_id}>")
+            # Award GP
+            current_balance = get_balance(winner.id)
+            new_balance = current_balance + gp_amount
+            set_balance(winner.id, new_balance)
+            
+            # Give Winners Circle role
+            if winners_circle_role and winners_circle_role not in winner.roles:
+                try:
+                    await winner.add_roles(winners_circle_role)
+                except:
+                    pass
             
             # DM winner
             try:
-                user = await bot.fetch_user(int(winner_id))
                 dm_embed = discord.Embed(
                     title="🎉 Congratulations!",
-                    description=f"You won the giveaway for **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!",
+                    description=f"You won **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!",
                     color=discord.Color.gold()
                 )
-                dm_embed.set_footer(text=f"Server: {channel.guild.name}")
-                await user.send(embed=dm_embed)
+                dm_embed.set_thumbnail(url=THUMBNAIL_URL)
+                await winner.send(embed=dm_embed)
             except:
-                pass  # Couldn't DM user
+                pass
         
-        # Update giveaway message
-        winners_mention = ", ".join(winners_text)
+        # Announce winners
+        winner_list = "\n".join(winner_mentions)
+        
         embed = discord.Embed(
-            title="🎉 Giveaway Ended!",
-            description=f"**Prize:** {giveaway['prize']}\n**GP Reward:** {format_amount(gp_amount)} GP\n\n🎊 **Winner(s):** {winners_mention}",
+            title="🎉 Giveaway Ended! 🎉",
+            description=f"**Prize:** {giveaway['prize']}\n**GP Reward:** {format_amount(gp_amount)} GP\n\n{'**Winner:**' if num_to_pick == 1 else '**Winners:**'}\n{winner_list}",
             color=discord.Color.gold()
         )
+        embed.set_thumbnail(url=THUMBNAIL_URL)
+        embed.set_image(url=BANNER_URL)
         await message.edit(embed=embed, view=None)
         
-        # Announcement
-        await channel.send(f"🎉 **Giveaway ended!**\n\nWinner(s): {winners_mention}\nPrize: **{giveaway['prize']}** + **{format_amount(gp_amount)} GP**\n\nCongratulations! 🎊")
+        announcement = f"🎉 **Giveaway Ended!**\n\n{'Winner' if num_to_pick == 1 else 'Winners'}: {winner_list}\n**Prize:** {giveaway['prize']}\n**GP Awarded:** {format_amount(gp_amount)} GP each"
+        await channel.send(announcement)
         
     except Exception as e:
         print(f"Error ending giveaway {giveaway_id}: {e}")
 
-# Giveaway command group
+# Giveaway commands
 giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
 
 @giveaway_group.command(name="create", description="Create a new giveaway (Support only)")
 @app_commands.describe(
-    prize="What the giveaway is for",
-    gp_amount="GP amount to award winner (e.g., 20m, 500k, 1000)",
-    duration="Duration (e.g., 1d, 12h, 30m) - max 60 days",
+    prize="What are you giving away?",
+    gp_amount="GP reward amount (e.g., 20m, 500k, 1000)",
+    duration="Duration (e.g., 1d, 12h, 30m)",
     winners="Number of winners (default: 1)",
     required_role="Role required to enter (optional)"
 )
@@ -294,7 +405,7 @@ async def giveaway_create(
     # Parse duration
     duration_delta = parse_duration(duration)
     if duration_delta is None:
-        await interaction.response.send_message("❌ Invalid duration! Use format like: 1d, 12h, 30m (max 60 days)", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid duration! Use formats like: 1d, 12h, 30m (max 60 days)", ephemeral=True)
         return
     
     # Validate winners
@@ -302,32 +413,41 @@ async def giveaway_create(
         await interaction.response.send_message("❌ Must have at least 1 winner!", ephemeral=True)
         return
     
-    await interaction.response.defer()
-    
-    # Create giveaway
-    giveaway_id = str(datetime.utcnow().timestamp())
     end_time = datetime.utcnow() + duration_delta
+    giveaway_id = f"{interaction.channel.id}_{int(datetime.utcnow().timestamp())}"
     
-    # Create embed
+    # Create giveaway embed with enhanced formatting
     embed = discord.Embed(
-        title="🎉 GIVEAWAY 🎉",
-        description=f"**Prize:** {prize}\n**GP Reward:** {format_amount(parsed_gp)} GP\n\nClick the button below to enter!",
-        color=discord.Color.blue()
+        title=f"🎉 {prize}",
+        color=discord.Color.purple()
     )
-    embed.add_field(name="⏰ Ends", value=f"<t:{int(end_time.timestamp())}:R>", inline=True)
-    embed.add_field(name="🏆 Winners", value=str(winners), inline=True)
-    embed.add_field(name="📊 Entries", value="0", inline=True)
+    
+    description = f"Click 🎉 button to enter!\n"
+    description += f"**Winners:** {winners}\n"
+    description += f"**GP Reward:** {format_amount(parsed_gp)} GP each\n\n"
+    
+    # Add extra entries info
+    description += "**Extra Entries:**\n"
+    description += f"<@&{WINNERS_CIRCLE_ROLE_ID}>: **2 extra entries**\n"
+    description += f"<@&{BOOSTER_ROLE_ID}>: **3 extra entries**\n\n"
     
     if required_role:
-        embed.add_field(name="🔒 Required Role", value=required_role.mention, inline=False)
+        description += f"**Required Role:** {required_role.mention}\n\n"
     
-    embed.set_footer(text=f"Hosted by {interaction.user.display_name}")
+    description += f"**Winner will get:** <@&{WINNERS_CIRCLE_ROLE_ID}> role"
+    
+    embed.description = description
+    embed.set_footer(text=f"Hosted by: @{interaction.user.display_name}")
     embed.timestamp = end_time
+    embed.set_thumbnail(url=THUMBNAIL_URL)
+    embed.set_image(url=BANNER_URL)
     
-    # Send giveaway message
+    embed.add_field(name="⏰ Ends", value=f"<t:{int(end_time.timestamp())}:R>", inline=True)
+    embed.add_field(name="📊 Entries", value="0", inline=True)
+    
+    await interaction.response.send_message("✅ Creating giveaway...", ephemeral=True)
+    
     view = GiveawayButton(giveaway_id)
-    bot.add_view(view)  # Make button persistent
-    
     message = await interaction.channel.send(embed=embed, view=view)
     
     # Save giveaway data
@@ -409,28 +529,56 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
         await interaction.response.send_message("❌ No entries to reroll!", ephemeral=True)
         return
     
-    # Pick new winner
-    winner_id = random.choice(giveaway['entries'])
+    # Build weighted entry pool
+    guild = interaction.guild
+    entry_pool = []
+    
+    for user_id in giveaway['entries']:
+        try:
+            member = guild.get_member(int(user_id))
+            if not member:
+                continue
+            
+            user_entries = await get_user_entries(member)
+            for _ in range(user_entries):
+                entry_pool.append(member)
+        except:
+            continue
+    
+    if not entry_pool:
+        await interaction.response.send_message("❌ No valid entries to reroll!", ephemeral=True)
+        return
+    
+    # Pick new winner with weighted chances
+    winner = random.choice(entry_pool)
     gp_amount = giveaway['gp_amount']
     
     # Award GP
-    current_balance = get_balance(int(winner_id))
+    current_balance = get_balance(winner.id)
     new_balance = current_balance + gp_amount
-    set_balance(int(winner_id), new_balance)
+    set_balance(winner.id, new_balance)
+    
+    # Give Winners Circle role
+    winners_circle_role = guild.get_role(WINNERS_CIRCLE_ROLE_ID)
+    if winners_circle_role and winners_circle_role not in winner.roles:
+        try:
+            await winner.add_roles(winners_circle_role)
+        except:
+            pass
     
     # DM winner
     try:
-        user = await bot.fetch_user(int(winner_id))
         dm_embed = discord.Embed(
             title="🎉 Congratulations!",
-            description=f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!",
+            description=f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!",
             color=discord.Color.gold()
         )
-        await user.send(embed=dm_embed)
+        dm_embed.set_thumbnail(url=THUMBNAIL_URL)
+        await winner.send(embed=dm_embed)
     except:
         pass
     
-    await interaction.response.send_message(f"🎉 **Reroll Winner:** <@{winner_id}>\n**Prize:** {giveaway['prize']} + {format_amount(gp_amount)} GP")
+    await interaction.response.send_message(f"🎉 **Reroll Winner:** {winner.mention}\n**Prize:** {giveaway['prize']} + {format_amount(gp_amount)} GP")
 
 @giveaway_group.command(name="list", description="List all active giveaways")
 async def giveaway_list(interaction: discord.Interaction):
@@ -470,6 +618,7 @@ async def wallet(interaction: discord.Interaction):
         description=f"**{interaction.user.display_name}** has **{formatted_balance} GP**",
         color=discord.Color.gold()
     )
+    embed.set_thumbnail(url=THUMBNAIL_URL)
     await interaction.response.send_message(embed=embed)
 
 # /wallet-add command - add GP (support only)
