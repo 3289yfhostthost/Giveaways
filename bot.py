@@ -28,6 +28,9 @@ SUPPORT_ROLE_ID = 1434628709452742747
 BOOSTER_ROLE_ID = 591776624547201025
 WINNERS_CIRCLE_ROLE_ID = 1421659378523832431
 
+# Channel IDs
+GIVEAWAY_LOG_CHANNEL_ID = 1468897829035573291
+
 # Image URLs
 THUMBNAIL_URL = "https://oldschool.runescape.wiki/images/thumb/Coins_detail.png/240px-Coins_detail.png?404bc"
 BANNER_URL = "https://i.postimg.cc/HkTwJVLb/thieving-giveaway-banner-1.png"
@@ -324,15 +327,24 @@ async def end_giveaway(giveaway_id, giveaway):
         
         # Award GP to winners and give Winners Circle role
         winners_circle_role = guild.get_role(WINNERS_CIRCLE_ROLE_ID)
+        booster_role = guild.get_role(BOOSTER_ROLE_ID)
         winner_mentions = []
+        claim_deadline = datetime.utcnow() + timedelta(hours=24)
+        
+        # Get giveaway creation time
+        giveaway_created_time = datetime.fromisoformat(giveaway['end_time']) - (datetime.fromisoformat(giveaway['end_time']) - datetime.utcnow())
         
         for winner in winners:
             winner_mentions.append(winner.mention)
             
-            # Award GP
-            current_balance = get_balance(winner.id)
-            new_balance = current_balance + gp_amount
-            set_balance(winner.id, new_balance)
+            # Check if winner has booster role
+            has_booster = booster_role in winner.roles
+            
+            if has_booster:
+                # Award GP directly
+                current_balance = get_balance(winner.id)
+                new_balance = current_balance + gp_amount
+                set_balance(winner.id, new_balance)
             
             # Give Winners Circle role
             if winners_circle_role and winners_circle_role not in winner.roles:
@@ -345,9 +357,14 @@ async def end_giveaway(giveaway_id, giveaway):
             try:
                 dm_embed = discord.Embed(
                     title="🎉 Congratulations!",
-                    description=f"You won **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!",
                     color=discord.Color.gold()
                 )
+                
+                if has_booster:
+                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!"
+                else:
+                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n💰 **Prize:** {format_amount(gp_amount)} GP\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
+                
                 dm_embed.set_thumbnail(url=THUMBNAIL_URL)
                 await winner.send(embed=dm_embed)
             except:
@@ -367,6 +384,49 @@ async def end_giveaway(giveaway_id, giveaway):
         
         announcement = f"🎉 **Giveaway Ended!**\n\n{'Winner' if num_to_pick == 1 else 'Winners'}: {winner_list}\n**Prize:** {giveaway['prize']}\n**GP Awarded:** {format_amount(gp_amount)} GP each"
         await channel.send(announcement)
+        
+        # Log to giveaway log channel
+        try:
+            log_channel = bot.get_channel(GIVEAWAY_LOG_CHANNEL_ID)
+            if log_channel:
+                host = guild.get_member(giveaway['host_id'])
+                host_mention = host.mention if host else f"<@{giveaway['host_id']}>"
+                
+                # Create log embed
+                log_embed = discord.Embed(
+                    title="📋 Giveaway Winner Log",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.utcnow()
+                )
+                
+                log_embed.add_field(
+                    name="🎁 Giveaway Details",
+                    value=f"**Prize:** {giveaway['prize']}\n**GP Amount:** {format_amount(gp_amount)} GP\n**Created by:** {host_mention}\n**Created at:** <t:{int(datetime.fromisoformat(giveaway['end_time']).timestamp())}:F>",
+                    inline=False
+                )
+                
+                # Add winner info with claim deadline
+                winner_info = ""
+                for i, winner in enumerate(winners, 1):
+                    has_booster = booster_role in winner.roles
+                    status = "✅ Auto-claimed" if has_booster else "⏳ Must claim"
+                    winner_info += f"**Winner {i}:** {winner.mention} ({status})\n"
+                
+                winner_info += f"\n**Won at:** <t:{int(datetime.utcnow().timestamp())}:F>\n"
+                winner_info += f"**Claim deadline:** <t:{int(claim_deadline.timestamp())}:R>"
+                
+                log_embed.add_field(
+                    name="🏆 Winners",
+                    value=winner_info,
+                    inline=False
+                )
+                
+                log_embed.set_thumbnail(url=THUMBNAIL_URL)
+                log_embed.set_footer(text=f"Giveaway ID: {giveaway_id}")
+                
+                await log_channel.send(embed=log_embed)
+        except Exception as e:
+            print(f"Error logging giveaway: {e}")
         
     except Exception as e:
         print(f"Error ending giveaway {giveaway_id}: {e}")
@@ -553,10 +613,16 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     winner = random.choice(entry_pool)
     gp_amount = giveaway['gp_amount']
     
-    # Award GP
-    current_balance = get_balance(winner.id)
-    new_balance = current_balance + gp_amount
-    set_balance(winner.id, new_balance)
+    # Check if winner has booster role
+    booster_role = guild.get_role(BOOSTER_ROLE_ID)
+    has_booster = booster_role in winner.roles
+    claim_deadline = datetime.utcnow() + timedelta(hours=24)
+    
+    if has_booster:
+        # Award GP directly
+        current_balance = get_balance(winner.id)
+        new_balance = current_balance + gp_amount
+        set_balance(winner.id, new_balance)
     
     # Give Winners Circle role
     winners_circle_role = guild.get_role(WINNERS_CIRCLE_ROLE_ID)
@@ -570,15 +636,56 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     try:
         dm_embed = discord.Embed(
             title="🎉 Congratulations!",
-            description=f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!",
             color=discord.Color.gold()
         )
+        
+        if has_booster:
+            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!"
+        else:
+            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **Prize:** {format_amount(gp_amount)} GP\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
+        
         dm_embed.set_thumbnail(url=THUMBNAIL_URL)
         await winner.send(embed=dm_embed)
     except:
         pass
     
     await interaction.response.send_message(f"🎉 **Reroll Winner:** {winner.mention}\n**Prize:** {giveaway['prize']} + {format_amount(gp_amount)} GP")
+    
+    # Log the reroll
+    try:
+        log_channel = bot.get_channel(GIVEAWAY_LOG_CHANNEL_ID)
+        if log_channel:
+            host = guild.get_member(giveaway['host_id'])
+            host_mention = host.mention if host else f"<@{giveaway['host_id']}>"
+            
+            log_embed = discord.Embed(
+                title="🔄 Giveaway Reroll Log",
+                color=discord.Color.orange(),
+                timestamp=datetime.utcnow()
+            )
+            
+            log_embed.add_field(
+                name="🎁 Giveaway Details",
+                value=f"**Prize:** {giveaway['prize']}\n**GP Amount:** {format_amount(gp_amount)} GP\n**Original Host:** {host_mention}\n**Rerolled by:** {interaction.user.mention}",
+                inline=False
+            )
+            
+            status = "✅ Auto-claimed" if has_booster else "⏳ Must claim"
+            winner_info = f"**Winner:** {winner.mention} ({status})\n"
+            winner_info += f"**Won at:** <t:{int(datetime.utcnow().timestamp())}:F>\n"
+            winner_info += f"**Claim deadline:** <t:{int(claim_deadline.timestamp())}:R>"
+            
+            log_embed.add_field(
+                name="🏆 New Winner",
+                value=winner_info,
+                inline=False
+            )
+            
+            log_embed.set_thumbnail(url=THUMBNAIL_URL)
+            
+            await log_channel.send(embed=log_embed)
+    except Exception as e:
+        print(f"Error logging reroll: {e}")
 
 @giveaway_group.command(name="list", description="List all active giveaways")
 async def giveaway_list(interaction: discord.Interaction):
