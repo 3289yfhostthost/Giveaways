@@ -88,7 +88,7 @@ async def on_ready():
 @tasks.loop(seconds=10)
 async def check_giveaways():
     """Check for ended giveaways and pick winners"""
-    current_time = datetime.now(datetime.UTC).replace(tzinfo=None)
+    current_time = datetime.utcnow()
     ended_giveaways = []
     
     for message_id, giveaway_data in active_giveaways.items():
