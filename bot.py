@@ -98,24 +98,39 @@ def set_balance(user_id, amount):
     wallets[str(user_id)] = amount
     save_wallets(wallets)
 
-# Parse duration string (e.g., "1d", "12h", "30m")
+# Parse duration string (e.g., "1d", "7 days", "12h", "12 hours", "30m", "30 minutes")
 def parse_duration(duration_str):
     duration_str = duration_str.lower().strip()
+    
+    # Try short format first (1d, 12h, 30m)
     match = re.match(r'^(\d+)([dhm])$', duration_str)
-    if not match:
-        return None
+    if match:
+        value, unit = match.groups()
+        value = int(value)
+        
+        if unit == 'd':
+            if value > 60:  # Max 60 days
+                return None
+            return timedelta(days=value)
+        elif unit == 'h':
+            return timedelta(hours=value)
+        elif unit == 'm':
+            return timedelta(minutes=value)
     
-    value, unit = match.groups()
-    value = int(value)
-    
-    if unit == 'd':
-        if value > 60:  # Max 60 days
-            return None
-        return timedelta(days=value)
-    elif unit == 'h':
-        return timedelta(hours=value)
-    elif unit == 'm':
-        return timedelta(minutes=value)
+    # Try long format (7 days, 12 hours, 30 minutes)
+    match = re.match(r'^(\d+)\s*(day|days|hour|hours|minute|minutes|min|mins)$', duration_str)
+    if match:
+        value, unit = match.groups()
+        value = int(value)
+        
+        if unit in ['day', 'days']:
+            if value > 60:  # Max 60 days
+                return None
+            return timedelta(days=value)
+        elif unit in ['hour', 'hours']:
+            return timedelta(hours=value)
+        elif unit in ['minute', 'minutes', 'min', 'mins']:
+            return timedelta(minutes=value)
     
     return None
 
@@ -324,6 +339,7 @@ async def end_giveaway(giveaway_id, giveaway):
             entry_pool = [m for m in entry_pool if m.id != winner.id]
         
         gp_amount = giveaway['gp_amount']
+        gp_display = giveaway.get('gp_display', format_amount(gp_amount) + " GP")
         
         # Award GP to winners and give Winners Circle role
         winners_circle_role = guild.get_role(WINNERS_CIRCLE_ROLE_ID)
@@ -340,7 +356,8 @@ async def end_giveaway(giveaway_id, giveaway):
             # Check if winner has booster role
             has_booster = booster_role in winner.roles
             
-            if has_booster:
+            # Only add GP if gp_amount > 0 and winner has booster
+            if has_booster and gp_amount > 0:
                 # Award GP directly
                 current_balance = get_balance(winner.id)
                 new_balance = current_balance + gp_amount
@@ -360,10 +377,13 @@ async def end_giveaway(giveaway_id, giveaway):
                     color=discord.Color.gold()
                 )
                 
-                if has_booster:
-                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!"
+                if has_booster and gp_amount > 0:
+                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n💰 **{gp_display}** has been added to your wallet!\n🏆 You've been given the Winners Circle role!"
+                elif gp_amount > 0:
+                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n💰 **Prize:** {gp_display}\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
                 else:
-                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n💰 **Prize:** {format_amount(gp_amount)} GP\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
+                    # No GP prize (e.g., "bond")
+                    dm_embed.description = f"You won **{giveaway['prize']}**!\n\n🎁 **Prize:** {gp_display}\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
                 
                 dm_embed.set_thumbnail(url=THUMBNAIL_URL)
                 await winner.send(embed=dm_embed)
@@ -375,14 +395,16 @@ async def end_giveaway(giveaway_id, giveaway):
         
         embed = discord.Embed(
             title="🎉 Giveaway Ended! 🎉",
-            description=f"**Prize:** {giveaway['prize']}\n**GP Reward:** {format_amount(gp_amount)} GP\n\n{'**Winner:**' if num_to_pick == 1 else '**Winners:**'}\n{winner_list}",
+            description=f"**Prize:** {giveaway['prize']}\n**GP Reward:** {gp_display}\n\n{'**Winner:**' if num_to_pick == 1 else '**Winners:**'}\n{winner_list}",
             color=discord.Color.gold()
         )
         embed.set_thumbnail(url=THUMBNAIL_URL)
         embed.set_image(url=BANNER_URL)
         await message.edit(embed=embed, view=None)
         
-        announcement = f"🎉 **Giveaway Ended!**\n\n{'Winner' if num_to_pick == 1 else 'Winners'}: {winner_list}\n**Prize:** {giveaway['prize']}\n**GP Awarded:** {format_amount(gp_amount)} GP each"
+        announcement = f"🎉 **Giveaway Ended!**\n\n{'Winner' if num_to_pick == 1 else 'Winners'}: {winner_list}\n**Prize:** {giveaway['prize']}\n**Reward:** {gp_display}"
+        if num_to_pick > 1 and gp_amount > 0:
+            announcement += " each"
         await channel.send(announcement)
         
         # Log to giveaway log channel
@@ -401,7 +423,7 @@ async def end_giveaway(giveaway_id, giveaway):
                 
                 log_embed.add_field(
                     name="🎁 Giveaway Details",
-                    value=f"**Prize:** {giveaway['prize']}\n**GP Amount:** {format_amount(gp_amount)} GP\n**Created by:** {host_mention}\n**Created at:** <t:{int(datetime.fromisoformat(giveaway['end_time']).timestamp())}:F>",
+                    value=f"**Prize:** {giveaway['prize']}\n**Reward:** {gp_display}\n**Created by:** {host_mention}\n**Created at:** <t:{int(datetime.fromisoformat(giveaway['end_time']).timestamp())}:F>",
                     inline=False
                 )
                 
@@ -409,7 +431,10 @@ async def end_giveaway(giveaway_id, giveaway):
                 winner_info = ""
                 for i, winner in enumerate(winners, 1):
                     has_booster = booster_role in winner.roles
-                    status = "✅ Auto-claimed" if has_booster else "⏳ Must claim"
+                    if gp_amount > 0:
+                        status = "✅ Auto-claimed" if has_booster else "⏳ Must claim"
+                    else:
+                        status = "⏳ Must claim"
                     winner_info += f"**Winner {i}:** {winner.mention} ({status})\n"
                 
                 winner_info += f"\n**Won at:** <t:{int(datetime.utcnow().timestamp())}:F>\n"
@@ -437,8 +462,8 @@ giveaway_group = app_commands.Group(name="giveaway", description="Giveaway comma
 @giveaway_group.command(name="create", description="Create a new giveaway (Support only)")
 @app_commands.describe(
     prize="What are you giving away?",
-    gp_amount="GP reward amount (e.g., 20m, 500k, 1000)",
-    duration="Duration (e.g., 1d, 12h, 30m)",
+    gp_amount="GP reward amount (e.g., 20m, 500k, 1000) or text like 'bond' - use 0 for no GP",
+    duration="Duration (e.g., 7d, 7 days, 12h, 12 hours, 30m, 30 minutes)",
     winners="Number of winners (default: 1)",
     required_role="Role required to enter (optional)"
 )
@@ -456,16 +481,22 @@ async def giveaway_create(
         await interaction.response.send_message("❌ You need the @support role to use this command!", ephemeral=True)
         return
     
-    # Parse GP amount
+    # Parse GP amount (allow text for non-GP prizes like "bond")
     parsed_gp = parse_amount(gp_amount)
-    if parsed_gp is None or parsed_gp <= 0:
-        await interaction.response.send_message("❌ Invalid GP amount! Use formats like: 20m, 500k, 1000", ephemeral=True)
-        return
+    if parsed_gp is None:
+        # If it's not a valid number, treat as text (like "bond")
+        parsed_gp = 0
+        gp_display = gp_amount
+    else:
+        if parsed_gp < 0:
+            await interaction.response.send_message("❌ GP amount cannot be negative!", ephemeral=True)
+            return
+        gp_display = format_amount(parsed_gp) + " GP"
     
     # Parse duration
     duration_delta = parse_duration(duration)
     if duration_delta is None:
-        await interaction.response.send_message("❌ Invalid duration! Use formats like: 1d, 12h, 30m (max 60 days)", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid duration! Use formats like: 7d, 7 days, 12h, 12 hours, 30m, 30 minutes (max 60 days)", ephemeral=True)
         return
     
     # Validate winners
@@ -484,7 +515,10 @@ async def giveaway_create(
     
     description = f"Click 🎉 button to enter!\n"
     description += f"**Winners:** {winners}\n"
-    description += f"**GP Reward:** {format_amount(parsed_gp)} GP each\n\n"
+    description += f"**GP Reward:** {gp_display}"
+    if winners > 1 and parsed_gp > 0:
+        description += " each"
+    description += "\n\n"
     
     # Add extra entries info
     description += "**Extra Entries:**\n"
@@ -515,6 +549,7 @@ async def giveaway_create(
     giveaways[giveaway_id] = {
         'prize': prize,
         'gp_amount': parsed_gp,
+        'gp_display': gp_display,
         'winners': winners,
         'entries': [],
         'channel_id': interaction.channel.id,
@@ -612,13 +647,15 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     # Pick new winner with weighted chances
     winner = random.choice(entry_pool)
     gp_amount = giveaway['gp_amount']
+    gp_display = giveaway.get('gp_display', format_amount(gp_amount) + " GP")
     
     # Check if winner has booster role
     booster_role = guild.get_role(BOOSTER_ROLE_ID)
     has_booster = booster_role in winner.roles
     claim_deadline = datetime.utcnow() + timedelta(hours=24)
     
-    if has_booster:
+    # Only add GP if gp_amount > 0 and winner has booster
+    if has_booster and gp_amount > 0:
         # Award GP directly
         current_balance = get_balance(winner.id)
         new_balance = current_balance + gp_amount
@@ -639,17 +676,20 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
             color=discord.Color.gold()
         )
         
-        if has_booster:
-            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **{format_amount(gp_amount)} GP** has been added to your wallet!\n🏆 You've been given the Winners Circle role!"
+        if has_booster and gp_amount > 0:
+            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **{gp_display}** has been added to your wallet!\n🏆 You've been given the Winners Circle role!"
+        elif gp_amount > 0:
+            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **Prize:** {gp_display}\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
         else:
-            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n💰 **Prize:** {format_amount(gp_amount)} GP\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
+            # No GP prize
+            dm_embed.description = f"You won the reroll for **{giveaway['prize']}**!\n\n🎁 **Prize:** {gp_display}\n🏆 You've been given the Winners Circle role!\n\n⚠️ **YOU MUST OPEN A TICKET WITHIN 24 HOURS OF THIS MESSAGE TO BE ABLE TO CLAIM. IF YOU DO NOT OPEN A CLAIM TICKET WITHIN THE ALLOTTED TIME YOUR PRIZE WILL BE FORFEITED.**\n\n⏰ Claim by: <t:{int(claim_deadline.timestamp())}:F>"
         
         dm_embed.set_thumbnail(url=THUMBNAIL_URL)
         await winner.send(embed=dm_embed)
     except:
         pass
     
-    await interaction.response.send_message(f"🎉 **Reroll Winner:** {winner.mention}\n**Prize:** {giveaway['prize']} + {format_amount(gp_amount)} GP")
+    await interaction.response.send_message(f"🎉 **Reroll Winner:** {winner.mention}\n**Prize:** {giveaway['prize']} + {gp_display}")
     
     # Log the reroll
     try:
@@ -666,11 +706,11 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
             
             log_embed.add_field(
                 name="🎁 Giveaway Details",
-                value=f"**Prize:** {giveaway['prize']}\n**GP Amount:** {format_amount(gp_amount)} GP\n**Original Host:** {host_mention}\n**Rerolled by:** {interaction.user.mention}",
+                value=f"**Prize:** {giveaway['prize']}\n**Reward:** {gp_display}\n**Original Host:** {host_mention}\n**Rerolled by:** {interaction.user.mention}",
                 inline=False
             )
             
-            status = "✅ Auto-claimed" if has_booster else "⏳ Must claim"
+            status = "✅ Auto-claimed" if (has_booster and gp_amount > 0) else "⏳ Must claim"
             winner_info = f"**Winner:** {winner.mention} ({status})\n"
             winner_info += f"**Won at:** <t:{int(datetime.utcnow().timestamp())}:F>\n"
             winner_info += f"**Claim deadline:** <t:{int(claim_deadline.timestamp())}:R>"
@@ -703,9 +743,10 @@ async def giveaway_list(interaction: discord.Interaction):
     
     for g in active:
         end_time = datetime.fromisoformat(g['end_time'])
+        gp_display = g.get('gp_display', format_amount(g['gp_amount']) + " GP")
         embed.add_field(
             name=g['prize'],
-            value=f"Reward: {format_amount(g['gp_amount'])} GP\nEntries: {len(g['entries'])}\nEnds: <t:{int(end_time.timestamp())}:R>\n[Jump to Giveaway](https://discord.com/channels/{interaction.guild.id}/{g['channel_id']}/{g['message_id']})",
+            value=f"Reward: {gp_display}\nEntries: {len(g['entries'])}\nEnds: <t:{int(end_time.timestamp())}:R>\n[Jump to Giveaway](https://discord.com/channels/{interaction.guild.id}/{g['channel_id']}/{g['message_id']})",
             inline=False
         )
     
